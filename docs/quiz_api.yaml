@@ -1,0 +1,329 @@
+openapi: 3.0.0
+info:
+  title: Quiz App API
+  description: REST-Schnittstelle für das Semesterprojekt Quiz-App (Szenario inkl. Duellmodus und flexibler Antwortlogik).
+  version: 1.0.0
+servers:
+  - url: https://api.quizapp.bib/v1
+    description: Produktionsserver
+
+components:
+  securitySchemes:
+    SessionKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Session-Key
+
+  schemas:
+    # --- Grundlegende Datenstrukturen ---
+    Player:
+      type: object
+      properties:
+        id:
+          type: integer
+        username:
+          type: string
+        sessionTime:
+          type: string
+          format: date-time
+
+    Category:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+
+    Difficulty:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        level:
+          type: integer
+
+    # --- Spielbezogene Strukturen ---
+    AnswerPublic:
+      type: object
+      description: Antwortobjekt für den Client (ohne 'isCorrect' Flag, um Cheating zu verhindern).
+      properties:
+        id:
+          type: integer
+        text:
+          type: string
+
+    Question:
+      type: object
+      properties:
+        id:
+          type: integer
+        text:
+          type: string
+        category:
+          $ref: '#/components/schemas/Category'
+        difficulty:
+          $ref: '#/components/schemas/Difficulty'
+        answers:
+          type: array
+          description: Liefert genau 4 zufällige Antworten (1 Richtig, 3 Falsch), auch wenn in der DB mehr hinterlegt sind [Szenario Anforderung].
+          items:
+            $ref: '#/components/schemas/AnswerPublic'
+          minItems: 4
+          maxItems: 4
+
+    GameConfig:
+      type: object
+      description: Konfigurationen wie Rundenanzahl, Zeitlimits etc.
+      properties:
+        rounds:
+          type: integer
+        questionsPerRound:
+          type: integer
+        maxTimeSeconds:
+          type: integer
+
+    GameResult:
+      type: object
+      properties:
+        correct:
+          type: boolean
+        correctAnswerId:
+          type: integer
+          description: Die ID der tatsächlich richtigen Antwort (Auflösung).
+        newScore:
+          type: integer
+
+# --- Endpunkte ---
+paths:
+  # 1. Authentifizierung & User Management
+  /auth/register:
+    post:
+      summary: Neuen Spieler registrieren
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+      responses:
+        '201':
+          description: Spieler erfolgreich erstellt
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Player'
+
+  /auth/login:
+    post:
+      summary: Login durchführen
+      description: Gibt den Session-Key zurück, der für weitere Anfragen benötigt wird.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+      responses:
+        '200':
+          description: Login erfolgreich
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessionKey:
+                    type: string
+                  sessionTime:
+                    type: string
+                    format: date-time
+
+  # 2. Metadaten (Für Auswahlmenüs im Frontend)
+  /categories:
+    get:
+      summary: Verfügbare Kategorien abrufen
+      responses:
+        '200':
+          description: Liste der Kategorien
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Category'
+
+  /difficulties:
+    get:
+      summary: Schwierigkeitsgrade abrufen
+      responses:
+        '200':
+          description: Liste der Schwierigkeitsgrade
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Difficulty'
+
+  # 3. Spielsteuerung (Core Gameplay)
+  /games:
+    post:
+      summary: Neues Spiel starten (Einzel oder Duell)
+      security:
+        - SessionKeyAuth: []
+      description: Erstellt eine Spielsitzung. Unterstützt Duellmodus durch Angabe mehrerer Spieler-IDs.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                mode:
+                  type: string
+                  enum: [single, duel]
+                playerIds:
+                  type: array
+                  items:
+                    type: integer
+                  description: Liste der teilnehmenden Spieler-IDs (bei Einzelspieler nur die eigene ID).
+                categoryId:
+                  type: integer
+                difficultyId:
+                  type: integer
+      responses:
+        '201':
+          description: Spiel gestartet
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  gameId:
+                    type: integer
+                  config:
+                    $ref: '#/components/schemas/GameConfig'
+                  startTime:
+                    type: string
+                    format: date-time
+
+  /games/{gameId}/question:
+    get:
+      summary: Nächste Frage abrufen
+      security:
+        - SessionKeyAuth: []
+      description: Liefert eine zufällige Frage basierend auf dem Spielstatus. Die Antworten sind bereits auf 4 begrenzt.
+      parameters:
+        - in: path
+          name: gameId
+          schema:
+            type: integer
+          required: true
+      responses:
+        '200':
+          description: Frageobjekt
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Question'
+
+  /games/{gameId}/answer:
+    post:
+      summary: Antwort einreichen
+      security:
+        - SessionKeyAuth: []
+      description: Prüft die Antwort und speichert das Ergebnis in der Historie.
+      parameters:
+        - in: path
+          name: gameId
+          schema:
+            type: integer
+          required: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                questionId:
+                  type: integer
+                selectedAnswerId:
+                  type: integer
+      responses:
+        '200':
+          description: Ergebnis der Antwort
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameResult'
+
+  /games/{gameId}/status:
+    get:
+      summary: Spielstand abrufen
+      security:
+        - SessionKeyAuth: []
+      parameters:
+        - in: path
+          name: gameId
+          schema:
+            type: integer
+          required: true
+      responses:
+        '200':
+          description: Aktueller Score aller Teilnehmer
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  isFinished:
+                    type: boolean
+                  scores:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        username:
+                          type: string
+                        score:
+                          type: integer
+
+  # 4. Statistiken
+  /statistics/user/{userId}:
+    get:
+      summary: Statistik eines Spielers abrufen
+      security:
+        - SessionKeyAuth: []
+      parameters:
+        - in: path
+          name: userId
+          schema:
+            type: integer
+          required: true
+      responses:
+        '200':
+          description: Persönliche Statistik
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  gamesPlayed:
+                    type: integer
+                  duelsWon:
+                    type: integer
+                  correctAnswersPercentage:
+                    type: number
